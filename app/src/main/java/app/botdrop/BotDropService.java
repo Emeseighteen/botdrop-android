@@ -24,6 +24,11 @@ import java.util.concurrent.TimeUnit;
 public class BotDropService extends Service {
 
     private static final String LOG_TAG = "BotDropService";
+    private static final String BOTDROP_APT_SOURCE_LINE =
+        "deb [trusted=yes] https://zhixianio.github.io/botdrop-packages/ stable main";
+    private static final String BOTDROP_APT_SOURCES_LIST = TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/etc/apt/sources.list";
+    private static final String BOTDROP_APT_SOURCES_LIST_D = TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/etc/apt/sources.list.d";
+    private static final String BOTDROP_APT_LIST_FILE = BOTDROP_APT_SOURCES_LIST_D + "/botdrop.list";
 
     private final IBinder mBinder = new LocalBinder();
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
@@ -155,6 +160,8 @@ public class BotDropService extends Service {
             pb.environment().put("TMPDIR", TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);
             // Set SSL_CERT_FILE for Node.js fetch to find CA certificates
             pb.environment().put("SSL_CERT_FILE", TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/etc/tls/cert.pem");
+            // Ensure Node.js can resolve globally installed native addons (for sharp, etc.)
+            pb.environment().put("NODE_PATH", TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/lib/node_modules");
             // Prefer IPv4 first; avoids long IPv6 connect stalls in Android/proot environments.
             pb.environment().put("NODE_OPTIONS", "--dns-result-order=ipv4first");
 
@@ -239,6 +246,7 @@ public class BotDropService extends Service {
                 pb.environment().put("PATH", TermuxConstants.TERMUX_BIN_PREFIX_DIR_PATH + ":" + System.getenv("PATH"));
                 pb.environment().put("TMPDIR", TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);
                 pb.environment().put("SSL_CERT_FILE", TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/etc/tls/cert.pem");
+                pb.environment().put("NODE_PATH", TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/lib/node_modules");
                 pb.redirectErrorStream(true);
 
                 Logger.logInfo(LOG_TAG, "Starting install via " + INSTALL_SCRIPT);
@@ -384,6 +392,7 @@ public class BotDropService extends Service {
                "export PATH=$PREFIX/bin:$PATH && " +
                "export TMPDIR=$PREFIX/tmp && " +
                "export SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem && " +
+               "export NODE_PATH=$PREFIX/lib/node_modules && " +
                "export NODE_OPTIONS=--dns-result-order=ipv4first && " +
                command;
     }
@@ -399,6 +408,7 @@ public class BotDropService extends Service {
                "export PATH=$PREFIX/bin:$PATH && " +
                "export TMPDIR=$PREFIX/tmp && " +
                "export SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem && " +
+               "export NODE_PATH=$PREFIX/lib/node_modules && " +
                "export NODE_OPTIONS=--dns-result-order=ipv4first && " +
                // `openclaw` is installed as a wrapper that already runs under `termux-chroot`.
                // Avoid nesting proot/termux-chroot, which can stall gateway startup for minutes.
@@ -414,7 +424,7 @@ public class BotDropService extends Service {
         BotDropConfig.sanitizeLegacyConfig();
 
         mExecutor.execute(() -> {
-            CommandResult startResult = executeCommandSync(buildStartGatewayScript());
+            CommandResult startResult = executeGatewayStart();
             mHandler.post(() -> callback.onResult(startResult));
         });
     }
@@ -595,8 +605,7 @@ public class BotDropService extends Service {
                 Logger.logInfo(LOG_TAG, "Update: starting gateway");
                 notifyUpdateStep(callback, "Starting gateway...");
                 BotDropConfig.sanitizeLegacyConfig();
-                String startCmd = buildStartGatewayScript();
-                CommandResult startResult = executeCommandSync(startCmd, 60);
+                CommandResult startResult = executeGatewayStart();
 
                 String newVersion = getOpenclawVersion();
                 String versionStr = newVersion != null ? newVersion : "unknown";
@@ -621,6 +630,11 @@ public class BotDropService extends Service {
                 mUpdateInProgress = false;
             }
         });
+    }
+
+    private CommandResult executeGatewayStart() {
+        ensureSharpInstalled();
+        return executeCommandSync(buildStartGatewayScript());
     }
 
     /**
@@ -722,6 +736,87 @@ public class BotDropService extends Service {
     }
 
     /**
+     * Ensure sharp native addon is installed (idempotent, non-fatal).
+     * For upgrade users whose install.sh already ran before sharp support was added.
+     * Must be called on mExecutor thread (not the main thread).
+     */
+    private void ensureSharpInstalled() {
+        String cmd =
+            buildBotDropAptSourceScript() +
+            "SHARP_CHECK=$(node -e 'try { require(\"sharp\"); process.exit(0); } catch (e) { console.error(e.message); process.exit(1); }' 2>&1)\n" +
+            "SHARP_EXIT=$?\n" +
+            "if [ $SHARP_EXIT -eq 0 ]; then\n" +
+            "    echo 'sharp already installed'\n" +
+            "    exit 0\n" +
+            "fi\n" +
+            "if [ -n \"$SHARP_CHECK\" ]; then\n" +
+            "    echo \"sharp is installed but not runnable: $SHARP_CHECK\"\n" +
+            "fi\n" +
+            "echo 'Installing sharp native addon...'\n" +
+            "# APT sources are already forced to BotDrop-only above.\n" +
+            "# Remove conflicting packages that depend on clang from Termux main repo\n" +
+            "if dpkg -s dpkg-scanpackages >/dev/null 2>&1; then\n" +
+            "    dpkg -r dpkg-scanpackages 2>/dev/null || true\n" +
+            "fi\n" +
+            "if dpkg -s dpkg-perl >/dev/null 2>&1; then\n" +
+            "    dpkg -r dpkg-perl 2>/dev/null || true\n" +
+            "fi\n" +
+            "# Update only the BotDrop source\n" +
+            "APT_UPDATE_OUTPUT=$(apt update -o Dir::Etc::sourcelist=\"$PREFIX/etc/apt/sources.list.d/botdrop.list\" -o Dir::Etc::sourceparts=\"-\" 2>&1)\n" +
+            "APT_UPDATE_EXIT=$?\n" +
+            "if [ $APT_UPDATE_EXIT -ne 0 ]; then\n" +
+            "    echo \"apt update failed (exit $APT_UPDATE_EXIT): $APT_UPDATE_OUTPUT\"\n" +
+            "    exit 1\n" +
+            "fi\n" +
+            "# Install native addon via apt\n" +
+            "APT_OUTPUT=$(apt install -y -o Dir::Etc::sourcelist=\"$PREFIX/etc/apt/sources.list.d/botdrop.list\" -o Dir::Etc::sourceparts=\"-\" sharp-node-addon 2>&1)\n" +
+            "APT_EXIT=$?\n" +
+            "if [ $APT_EXIT -ne 0 ]; then\n" +
+            "    echo \"sharp-node-addon install failed (exit $APT_EXIT): $APT_OUTPUT\"\n" +
+            "    exit 1\n" +
+            "fi\n" +
+            "# Install sharp npm package (--ignore-scripts since native addon is from apt)\n" +
+            "NPM_OUTPUT=$(npm install -g sharp@0.34.5 --ignore-scripts 2>&1)\n" +
+            "NPM_EXIT=$?\n" +
+            "if [ $NPM_EXIT -ne 0 ]; then\n" +
+            "    echo \"sharp npm install failed (exit $NPM_EXIT): $NPM_OUTPUT\"\n" +
+            "    exit 1\n" +
+            "fi\n" +
+            "# Final verify that sharp can be imported from Node.js after install.\n" +
+            "SHARP_VERIFY=$(node -e 'try { require(\"sharp\"); process.exit(0); } catch (e) { console.error(e.message); process.exit(1); }' 2>&1)\n" +
+            "SHARP_VERIFY_EXIT=$?\n" +
+            "if [ $SHARP_VERIFY_EXIT -ne 0 ]; then\n" +
+            "    echo \"sharp verification failed (after install): $SHARP_VERIFY\"\n" +
+            "    exit 1\n" +
+            "fi\n" +
+            "echo 'sharp installed successfully'\n" +
+            "# Add NODE_PATH to botdrop-env.sh if missing\n" +
+            "ENV_FILE=$PREFIX/etc/profile.d/botdrop-env.sh\n" +
+            "if [ -f \"$ENV_FILE\" ] && ! grep -q 'NODE_PATH' \"$ENV_FILE\"; then\n" +
+            "    echo 'export NODE_PATH=$PREFIX/lib/node_modules' >> \"$ENV_FILE\"\n" +
+            "fi\n";
+
+        CommandResult result = executeCommandSync(cmd, 120);
+        if (result.success) {
+            Logger.logInfo(LOG_TAG, "ensureSharpInstalled: " + result.stdout.trim());
+        } else {
+            Logger.logWarn(LOG_TAG, "ensureSharpInstalled failed (non-fatal): " + result.stdout.trim());
+        }
+    }
+
+    private String buildBotDropAptSourceScript() {
+        return
+            "mkdir -p " + BOTDROP_APT_SOURCES_LIST_D + "\n" +
+            "printf '%s\\n' '" + BOTDROP_APT_SOURCE_LINE + "' > " + BOTDROP_APT_LIST_FILE + "\n" +
+            "printf '%s\\n' '" + BOTDROP_APT_SOURCE_LINE + "' > " + BOTDROP_APT_SOURCES_LIST + "\n" +
+            "for f in " + BOTDROP_APT_SOURCES_LIST_D + "/*.list; do\n" +
+            "    if [ -f \"$f\" ] && [ \"$f\" != \"" + BOTDROP_APT_LIST_FILE + "\" ]; then\n" +
+            "        rm -f \"$f\"\n" +
+            "    fi\n" +
+            "done\n";
+    }
+
+    /**
      * Build the start-gateway shell script (same logic as startGateway but returns the string
      * instead of executing it, so it can be used from within updateOpenclaw on mExecutor).
      */
@@ -750,9 +845,11 @@ public class BotDropService extends Service {
             "export PATH=$PREFIX/bin:$PATH\n" +
             "export TMPDIR=$PREFIX/tmp\n" +
             "export SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem\n" +
+            "export NODE_PATH=$PREFIX/lib/node_modules\n" +
             "export NODE_OPTIONS=--dns-result-order=ipv4first\n" +
             "echo \"=== Environment before chroot ===\" >&2\n" +
             "echo \"SSL_CERT_FILE=$SSL_CERT_FILE\" >&2\n" +
+            "echo \"NODE_PATH=$NODE_PATH\" >&2\n" +
             "echo \"NODE_OPTIONS=$NODE_OPTIONS\" >&2\n" +
             "echo \"Testing cert file access:\" >&2\n" +
             "ls -lh $PREFIX/etc/tls/cert.pem >&2 || echo \"cert.pem not found!\" >&2\n" +
