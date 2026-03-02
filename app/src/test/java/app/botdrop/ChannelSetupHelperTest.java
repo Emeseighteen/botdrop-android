@@ -412,6 +412,15 @@ public class ChannelSetupHelperTest {
     }
 
     @Test
+    public void testIsDiscordConfigured_withGuildOnly() throws JSONException {
+        JSONObject discord = new JSONObject();
+        discord.put("token", "bot-token");
+        JSONObject guilds = new JSONObject().put("guild1", new JSONObject());
+        discord.put("guilds", guilds);
+        assertTrue(ChannelSetupHelper.isDiscordConfigured(discord));
+    }
+
+    @Test
     public void testIsDiscordConfigured_noTokenFails() throws JSONException {
         JSONObject discord = new JSONObject();
         JSONObject guild = new JSONObject().put("channels", new JSONObject().put("c", new JSONObject()));
@@ -428,11 +437,11 @@ public class ChannelSetupHelperTest {
     }
 
     @Test
-    public void testIsDiscordConfigured_guildWithNoChannelsFails() throws JSONException {
+    public void testIsDiscordConfigured_guildKeyIsRequired() throws JSONException {
         JSONObject discord = new JSONObject();
         discord.put("token", "bot-token");
-        JSONObject guild = new JSONObject(); // no "channels" key
-        discord.put("guilds", new JSONObject().put("g1", guild));
+        JSONObject guild = new JSONObject();
+        discord.put("guilds", new JSONObject().put("", guild));
         assertFalse(ChannelSetupHelper.isDiscordConfigured(discord));
     }
 

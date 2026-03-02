@@ -148,7 +148,7 @@ public class ChannelSetupHelper {
     }
 
     /**
-     * Check if Discord channel is configured (has token + at least one guild with a channel).
+     * Check if Discord channel is configured (has token + at least one guild).
      */
     public static boolean isDiscordConfigured(JSONObject discord) {
         if (discord == null) {
@@ -166,12 +166,8 @@ public class ChannelSetupHelper {
         }
         Iterator<String> guildIterator = guilds.keys();
         while (guildIterator.hasNext()) {
-            JSONObject guildConfig = guilds.optJSONObject(guildIterator.next());
-            if (guildConfig == null) {
-                continue;
-            }
-            JSONObject guildChannels = guildConfig.optJSONObject("channels");
-            if (guildChannels != null && guildChannels.length() > 0) {
+            String guildId = guildIterator.next();
+            if (!TextUtils.isEmpty(guildId)) {
                 return true;
             }
         }
@@ -212,6 +208,7 @@ public class ChannelSetupHelper {
      *
      * For Telegram: { channels: { telegram: { enabled: true, botToken: "...", dmPolicy: "allowlist" } } }
      * For Discord:  { channels: { discord: { enabled: true, token: "...", groupPolicy: "allowlist", guilds: { ... } } } }
+     * If a guild is configured without a channel map (or with an empty one), it is interpreted as all channels in that guild.
      *
      * @param platform "telegram" or "discord"
      * @param botToken Bot token
@@ -297,12 +294,13 @@ public class ChannelSetupHelper {
      *
      * For Telegram: { channels: { telegram: { enabled: true, botToken: "...", dmPolicy: "allowlist" } } }
      * For Discord:  { channels: { discord: { enabled: true, token: "...", groupPolicy: "allowlist", guilds: { ... } } } }
+     * If a guild is configured without a channel map (or with an empty one), it is interpreted as all channels in that guild.
      *
      * @param platform "telegram" or "discord"
      * @param botToken Bot token
      * @param ownerId User ID who owns/controls the bot (used for allowFrom)
      * @param guildId Discord guild ID (optional for non-discord platforms)
-     * @param channelId Discord channel ID (optional for non-discord platforms)
+     * @param channelId Discord channel ID (optional; when omitted, Discord config applies to all channels in the guild)
      * @return true if successful
      */
     public static boolean writeChannelConfig(
@@ -334,21 +332,33 @@ public class ChannelSetupHelper {
                 channels.put("telegram", telegram);
 
             } else if (platform.equals("discord")) {
-                JSONObject discord = new JSONObject();
+                JSONObject existingDiscord = channels.optJSONObject("discord");
+                JSONObject discord = existingDiscord != null ? new JSONObject(existingDiscord.toString()) : new JSONObject();
                 discord.put("enabled", true);
                 discord.put("token", botToken);
                 discord.put("groupPolicy", "allowlist");
 
-                if (!TextUtils.isEmpty(guildId) && !TextUtils.isEmpty(channelId)) {
-                    JSONObject guilds = new JSONObject();
-                    JSONObject guild = new JSONObject();
-                    JSONObject guildChannels = new JSONObject();
-                    JSONObject channel = new JSONObject();
-                    channel.put("allow", true);
-                    channel.put("requireMention", false);
-                    channel.put("autoThread", false);
-                    guildChannels.put(channelId, channel);
+                if (!TextUtils.isEmpty(guildId)) {
+                    JSONObject existingGuilds = existingDiscord != null ? existingDiscord.optJSONObject("guilds") : null;
+                    JSONObject guilds = existingGuilds != null ? new JSONObject(existingGuilds.toString()) : new JSONObject();
+                    JSONObject existingGuild = existingGuilds != null ? existingGuilds.optJSONObject(guildId) : null;
+                    JSONObject guild = existingGuild != null ? new JSONObject(existingGuild.toString()) : new JSONObject();
+                    JSONObject guildChannels = guild.optJSONObject("channels");
+                    if (guildChannels == null) {
+                        guildChannels = new JSONObject();
+                    }
+
+                    if (!TextUtils.isEmpty(channelId)) {
+                        JSONObject channel = new JSONObject();
+                        channel.put("allow", true);
+                        channel.put("requireMention", false);
+                        channel.put("autoThread", false);
+                        guildChannels.put(channelId, channel);
+                    } else {
+                        guildChannels = new JSONObject();
+                    }
                     guild.put("channels", guildChannels);
+
                     guilds.put(guildId, guild);
                     discord.put("guilds", guilds);
                 }
