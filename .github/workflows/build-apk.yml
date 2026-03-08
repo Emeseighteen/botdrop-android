@@ -86,7 +86,7 @@ jobs:
             RELEASE_VERSION_NAME="v${CURRENT_VERSION_NAME}+${GITHUB_SHA:0:7}"
           fi
 
-          APK_DIR_PATH="./app/build/outputs/apk/release"
+          APK_DIR_PATH="./app/build/outputs/apk/debug"
           APK_VERSION_TAG="$RELEASE_VERSION_NAME-${{ env.PACKAGE_VARIANT }}-release"
           APK_BASENAME_PREFIX="botdrop-app_$APK_VERSION_TAG"
 
@@ -102,11 +102,7 @@ jobs:
           export TERMUX_PACKAGE_VARIANT="${{ env.PACKAGE_VARIANT }}"
 
           # Build release APK with signing
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=$(pwd)/app/release-key.jks \
-            -Pandroid.injected.signing.store.password="$SIGNING_KEY_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$SIGNING_KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$SIGNING_KEY_PASSWORD"
+          ./gradlew assembleDebug
 
           echo "Validating APKs..."
           ls -la "$APK_DIR_PATH/"
